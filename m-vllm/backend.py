@@ -1,5 +1,5 @@
-import m_vllm_csrc
-
+from .kernels.m_vllm_csrc import rms_norm_kernel
+import torch
 
 
 
@@ -8,5 +8,5 @@ class MyAttBackEnd:
     def __init__(self):
         self.name = "my_backend"
 
-    def FalshAttentionBackend(q, k, v, mask) -> torch.Tensor:
-        return m_vllm_csrc.FalshAttention(q, k, v, mask)
+    def RMSNormBackend(self,q, k, v, mask) -> torch.Tensor:
+        return rms_norm_kernel(q)

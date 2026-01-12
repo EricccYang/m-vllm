@@ -1,5 +1,5 @@
 #include <cuda_runtime.h>
-#include "attn.h"
+#include "include/attn.h"
 
 
 __global__ void flash_attention_kernel(float* q, float* k, float* v, float* output, int batch_size, int head_size, int num_heads) {

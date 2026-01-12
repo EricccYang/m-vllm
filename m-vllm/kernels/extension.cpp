@@ -1,16 +1,11 @@
 #include <iostream>
-#include "attn.h"
-
-
+#include "include/attn.h"
 #include <pybind11/pybind11.h>
 
 // 简单的 C++ 函数
 int add(int a, int b) {
     return a + b;
 }
-
-
-
 
 
 
@@ -31,6 +26,8 @@ PYBIND11_MODULE(m_vllm_csrc, m) {
 
     // 绑定函数
     m.def("add", &add, "A function that adds two numbers");
+
+    m.def("rms_norm_kernel", &rms_norm_kernel, "A function that applies RMS norm kernel");
 
     // 绑定类
     pybind11::class_<Calculator>(m, "Calculator")
