@@ -23,3 +23,10 @@ void rms_norm_kernel(torch::Tensor const& x){
     flash_attention_kernel<<<1, 1>>>(x.data_ptr<float>(), x.data_ptr<float>(), x.data_ptr<float>(), x.data_ptr<float>(), 1, 1, 1);
     return;
 }
+
+
+
+
+void mha_kernel(float* q, float* k, float* v, float* output, int batch_size, int head_size, int num_heads){
+    return;
+}
