@@ -4,6 +4,14 @@ from transformers import AutoConfig
 
 
 @dataclass
+class TpGroupConfig:
+    id: int
+    group_size: int
+    world_rank: int
+
+
+
+@dataclass
 class ModelConfig:
     model_path: str
     hf_config: AutoConfig | None = None
@@ -23,3 +31,21 @@ class ModelConfig:
 
     # def get_model_config(self):
     #     return self.model_config
+
+
+
+
+@dataclass
+class GlobalConfig:
+    model_name: str
+    kvcache_block_size: int = 256
+    num_kvcache_blocks: int = -1
+    gpu_memory_utilization: float = 0.9
+    hf_config: AutoConfig | None = None
+    eos :int  = -1
+    tp_config : TpGroupConfig = TpGroupConfig()
+    model_config : ModelConfig = ModelConfig()
+
+
+
+

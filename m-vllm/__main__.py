@@ -6,9 +6,10 @@ from transformers import AutoConfig
 
 
 
+
 if __name__ == "__main__":
 
-    path = "./qwen3-14"
+    path = "./qwen3-14B"
     hf_config = AutoConfig.from_pretrained(path)
     
     

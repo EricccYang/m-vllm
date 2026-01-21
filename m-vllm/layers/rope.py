@@ -13,13 +13,12 @@ def rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
 
 
 class RotaryPositionEmbedding(nn.Module):
-    def __init__(self, num_heads: int, head_dim: int, max_position_embeddings: int, base = 10000):
+    def __init__(self, head_dim: int, max_position_embeddings: int, rope_base = 10000):
         super().__init__()
-        self.num_heads = num_heads
         self.head_dim = head_dim
         self.max_position_embeddings = max_position_embeddings
-        self.base = base
-        inv_freq = 1/(self.base**(torch.arange(0, self.head_dim, 2) / self.head_dim))
+        self.rope_base = rope_base
+        inv_freq = 1/(self.rope_base**(torch.arange(0, self.head_dim, 2) / self.head_dim))
         t = torch.arange(self.max_position_embeddings, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -39,7 +38,7 @@ class RotaryPositionEmbedding(nn.Module):
 
 
 @lru_cache(maxsize=1)
-def get_rope(num_heads, head_dim, max_position_embeddings=2048, base=10000):
-    rope = RotaryPositionEmbedding(num_heads, head_dim, max_position_embeddings, base)
+def get_rope(head_dim, max_position_embeddings=2048, rope_base=10000):
+    rope = RotaryPositionEmbedding(head_dim, max_position_embeddings, rope_base)
     return rope
 
