@@ -146,7 +146,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(BaseModel):
-    def __init__(self, model_path="qwen3-3b", model_config: Qwen3Config = None):
+    def __init__(self, model_config: Qwen3Config = None):
         super().__init__()
         self.model_config = model_config
         self.layers = nn.ModuleList(
@@ -179,10 +179,10 @@ class Qwen3ForCausalLM(BaseModel):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self, model_path="qwen3-3b", model_config: Qwen3Config = None):
+    def __init__(self, model_config: Qwen3Config = None):
         super().__init__()
         self.lm_head = ParallelLMHead(model_config.vocab_size, model_config.hidden_size)
-        self.model = Qwen3Model(model_path, model_config)
+        self.model = Qwen3Model(model_config)
 
     def forward(self, positions : torch.Tensor, input_ids: torch.Tensor):
         return self.model(input_ids, positions)
