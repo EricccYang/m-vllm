@@ -1,7 +1,10 @@
 import torch
-from m_vllm.engine.paged_kvcache import Block
+from typing import TYPE_CHECKING
 from enum import Enum, auto
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from m_vllm.engine.paged_kvcache import Block
 
 class SequenceStatus(Enum):
     WAITING = auto()

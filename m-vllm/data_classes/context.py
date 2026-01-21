@@ -14,14 +14,14 @@ class Context:
     block_tables: list[int]
 
 
-_CONTEXT = Context()
+_CONTEXT = Context(False, [], [], 0, 0, [], [])
 
 def get_context():
     return _CONTEXT
 
 def reset_context():
     global _CONTEXT
-    _CONTEXT = Context()
+    _CONTEXT = Context(False, [], [], 0, 0, [], [])
 
 def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
     global _CONTEXT

@@ -5,12 +5,17 @@ from torch import nn
 
 from m_vllm.models.BaseModel import BaseModel
 from m_vllm.kernels.m_vllm_csrc import add
-from m_vllm.backend import MHAAttBackEnd
-from m_vllm.data_classes.Batch import Batch
+from m_vllm.backends.backend import MHAAttBackEnd
 from m_vllm.layers.norm import RMSNorm
-from m_vllm.layers.GatedMlp import GatedMLP
+from m_vllm.layers.mlp import MLP
 from m_vllm.layers.rope import get_rope
-from m_vllm.layers.linear import Linear, QKVParallelLinear, RowParallelLinear, ColumnParallelLinear, MergedColumnParallelLinear
+from m_vllm.layers.linear import (
+    Linear,
+    QKVParallelLinear,
+    RowParallelLinear,
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+)
 from m_vllm.layers.activation import SiluAndMul
 from m_vllm.layers.embed import VocabParallelEmbedding, ParallelLMHead
 
@@ -19,10 +24,11 @@ class MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
         # self.impl = GatedMlpBackend()
-        self.gate_up_proj = MergedColumnParallelLinear(hidden_size,  intermediate_size, bias=False)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, intermediate_size, bias=False
+        )
         self.down_proj = RowParallelLinear(hidden_size, hidden_size, bias=False)
         self.act = SiluAndMul()
-        
 
     def forward(self, x: torch.Tensor):
         up = self.gate_up_proj(x)
@@ -149,16 +155,13 @@ class Qwen3Model(BaseModel):
     def __init__(self, model_config: Qwen3Config = None):
         super().__init__()
         self.model_config = model_config
-        self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(model_config) for _ in range(model_config.num_layers)]
-        )
-        self.embed_tokens = VocabParallelEmbedding(
-            model_config.vocab_size, model_config.hidden_size
-        )
+        # self.layers = nn.ModuleList(
+        #     [Qwen3DecoderLayer(model_config) for _ in range(model_config.num_hidden_layers)]
+        # )
+        # self.embed_tokens = VocabParallelEmbedding(
+        #     model_config.vocab_size, model_config.hidden_size
+        # )
         self.norm = RMSNorm(model_config.hidden_size, model_config.rms_norm_eps)
-
-    def test(a):
-        return add(1, 2)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
@@ -166,7 +169,6 @@ class Qwen3Model(BaseModel):
             hidden_states, _ = layer(hidden_states, positions)
         hidden_states, _ = self.norm(hidden_states)
         return hidden_states
-        
 
 
 # 模型加载需要符合 safetensors 格式, 模型类及层类的成员变量命名需要符合 safetensors的内部定义
@@ -181,11 +183,11 @@ class Qwen3ForCausalLM(BaseModel):
 
     def __init__(self, model_config: Qwen3Config = None):
         super().__init__()
-        self.lm_head = ParallelLMHead(model_config.vocab_size, model_config.hidden_size)
         self.model = Qwen3Model(model_config)
+        self.lm_head = ParallelLMHead(model_config.vocab_size, model_config.hidden_size)
 
-    def forward(self, positions : torch.Tensor, input_ids: torch.Tensor):
+    def forward(self, positions: torch.Tensor, input_ids: torch.Tensor):
         return self.model(input_ids, positions)
-        
-    def compute_logits(self, hidden_states: torch.Tensor) ->torch.Tensor:
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.lm_head(hidden_states)
