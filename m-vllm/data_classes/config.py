@@ -47,3 +47,6 @@ class GlobalConfig:
     model_config: ModelConfig = field(
         default_factory=lambda: ModelConfig(model_path="", qwen3_config=None)
     )
+
+    def __post_init__(self):
+        self.world_size = self.tensor_parallel_size * self.pipeline_parallel_size

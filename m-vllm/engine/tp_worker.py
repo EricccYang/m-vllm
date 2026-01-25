@@ -64,18 +64,21 @@ class TPWorker:
         self.event = event
         if not self.tp_group_config.is_head() and self.event is not None:
             self.shm = SharedMemory(name="inter_tp_group", create=False)
+
+
+    
+    def init_dist_and_load(self):
         dist.init_process_group(
             "nccl",
             "tcp://localhost:2333",
             world_size=self.world_size,
             rank=self.world_rank,
         )
-
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(model_config.qwen3_config.dtype)
+        torch.set_default_dtype(self.model_config.qwen3_config.dtype)
         torch.cuda.set_device(self.world_rank)
         torch.set_default_device("cuda")
-        self.model_runner = ModelRunner(model_config.model_path, global_config)
+        self.model_runner = ModelRunner(self.model_config.model_path, self.global_config)
         self.allocate_kv_cache()
         torch.set_default_dtype(default_dtype)
 
@@ -84,11 +87,11 @@ class TPWorker:
         logger.info("Starting KV cache allocation")
         gpu_memory_utilization = self.global_config.gpu_memory_utilization
         free, total = torch.cuda.mem_get_info()
-        logger.info(f"free {free} bytes, total {total} bytes")
+        # logger.info(f"free {free} bytes, total {total} bytes")
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        logger.info(f"peak {peak} bytes, current {current} bytes")
+        # logger.info(f"peak {peak} bytes, current {current} bytes")
         cf = self.global_config.model_config.qwen3_config
         if cf is None:
             logger.error("qwen3_config is None!")
@@ -104,13 +107,13 @@ class TPWorker:
             * cf.dtype.itemsize
             * self.global_config.kvcache_block_size
         )
-        logger.info(f"block_bytes: {block_bytes}")
+        # logger.info(f"block_bytes: {block_bytes}")
         available_memory = total * gpu_memory_utilization - used - (peak - current)
-        logger.info(f"available_memory: {available_memory} bytes")
+        # logger.info(f"available_memory: {available_memory} bytes")
         
         # self.global_config.num_kvcache_blocks = int(available_memory // block_bytes)
         self.global_config.num_kvcache_blocks = 16
-        logger.info(f"allocate {self.global_config.num_kvcache_blocks} kvcache blocks")
+        # logger.info(f"allocate {self.global_config.num_kvcache_blocks} kvcache blocks")
         if self.global_config.num_kvcache_blocks <= 0:
             logger.error(
                 f"Failed to allocate KV cache: num_kvcache_blocks={self.global_config.num_kvcache_blocks}, available_memory={available_memory}, block_bytes={block_bytes}"
@@ -132,6 +135,7 @@ class TPWorker:
                 layer_id += 1
 
     def read_from_tp_group_mem(self):
+        logger.info("world rank %d is reading from tp group mem, world size %d", self.world_rank, self.world_size)
         assert self.world_size > 1 and self.world_rank > 0
         self.event.wait()
         n = int.from_bytes(self.shm.buf[0:4], "little")
@@ -179,11 +183,12 @@ class HeadTPWorker(TPWorker):
             self.tp_worker_events = []
             self.tp_group_processes = []
 
+    
         super().__init__(self.tp_group_config, model_config, global_config, event=None)
 
-        logger.info("tp group config: %s", self.tp_group_config)
-        if self.tp_group_config.group_size > 1:
-            self._launch_tp_workers()
+        logger.info("tp group config in head tp worker: %s", self.tp_group_config)
+        self._launch_tp_workers()
+        self.init_dist_and_load()
         self.scheduler = Scheduler(global_config)
 
     def start(self):
@@ -224,6 +229,7 @@ class HeadTPWorker(TPWorker):
             force=True,  # Python 3.8+ 支持，强制重新配置
         )
         worker = TPWorker(tp_group_config, model_config, global_config, event)
+        worker.init_dist_and_load()
         worker._loop()
 
     def schedule(self):
