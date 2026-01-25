@@ -62,18 +62,22 @@ class TPWorker:
             + tp_group_config.group_rank * global_config.pipeline_parallel_size
         )
         self.event = event
-
         if not self.tp_group_config.is_head() and self.event is not None:
             self.shm = SharedMemory(name="inter_tp_group", create=False)
-
         dist.init_process_group(
             "nccl",
             "tcp://localhost:2333",
             world_size=self.world_size,
             rank=self.world_rank,
         )
+
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(model_config.qwen3_config.dtype)
+        torch.cuda.set_device(self.world_rank)
+        torch.set_default_device("cuda")
         self.model_runner = ModelRunner(model_config.model_path, global_config)
         self.allocate_kv_cache()
+        torch.set_default_dtype(default_dtype)
 
     # 这里pp可能有问题，需要修改
     def allocate_kv_cache(self):
@@ -97,13 +101,15 @@ class TPWorker:
             * cf.num_hidden_layers
             * cf.num_attention_heads
             * cf.head_dim
-            * cf.torch_dtype.itemsize
+            * cf.dtype.itemsize
             * self.global_config.kvcache_block_size
         )
         logger.info(f"block_bytes: {block_bytes}")
         available_memory = total * gpu_memory_utilization - used - (peak - current)
         logger.info(f"available_memory: {available_memory} bytes")
-        self.global_config.num_kvcache_blocks = int(available_memory // block_bytes)
+        
+        # self.global_config.num_kvcache_blocks = int(available_memory // block_bytes)
+        self.global_config.num_kvcache_blocks = 16
         logger.info(f"allocate {self.global_config.num_kvcache_blocks} kvcache blocks")
         if self.global_config.num_kvcache_blocks <= 0:
             logger.error(
@@ -116,8 +122,8 @@ class TPWorker:
             self.global_config.num_kvcache_blocks,
             self.global_config.kvcache_block_size,
             cf.num_attention_heads,
-            cf.hidden_size,
-        )
+            cf.head_dim,
+        ).cuda(non_blocking=True)
         layer_id = 0
         for module in self.model_runner.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -138,6 +144,7 @@ class TPWorker:
         raise NotImplementedError("Should be implemented in HeadTPWorker")
 
     def _loop(self):
+        logger.info("TPWorker number %d loop started", self.world_rank)
         while True:
             run_batch = self.read_from_tp_group_mem()
             input_ids, positions = self.prepare_batch(run_batch)
@@ -162,7 +169,7 @@ class HeadTPWorker(TPWorker):
 
         self.tp_group_config = TpGroupConfig(
             group_rank=group_rank,
-            group_size=global_config.pipeline_parallel_size,
+            group_size=global_config.tensor_parallel_size,
             group_inter_rank=0,
         )
         if self.tp_group_config.group_size > 1:
@@ -173,13 +180,17 @@ class HeadTPWorker(TPWorker):
             self.tp_group_processes = []
 
         super().__init__(self.tp_group_config, model_config, global_config, event=None)
-        self._launch_tp_workers()
+
+        logger.info("tp group config: %s", self.tp_group_config)
+        if self.tp_group_config.group_size > 1:
+            self._launch_tp_workers()
         self.scheduler = Scheduler(global_config)
 
     def start(self):
         self._loop()
 
     def _launch_tp_workers(self):
+        
         ctx = mp.get_context("spawn")
         manager = mp.Manager()
 
@@ -348,6 +359,7 @@ class HeadTPWorker(TPWorker):
         return block_tables
 
     def _loop(self):
+        logger.info("HeadTPWorker loop started")
         while True:
             request = self.read_request_from_engine()
             self.scheduler.add_request(request)

@@ -43,7 +43,7 @@ class LLMEngine:
         self.tp_group_size = self.args.pipeline_parallel_size
         
         # launch tp组的领头worker，tp组内worker由领头worker启动
-        self.global_config = GlobalConfig(model_name=args.model_path, model_config=self.model_config, eos=self.tokenizer.eos_token_id)
+        self.global_config = GlobalConfig(model_name=args.model_path, model_config=self.model_config, eos=self.tokenizer.eos_token_id, tensor_parallel_size=self.args.tensor_parallel_size, pipeline_parallel_size=self.args.pipeline_parallel_size)
         self.init_worker_group()
 
         #  api请求队列
@@ -70,13 +70,18 @@ class LLMEngine:
 
         # 管理 batch 的能力应该交给谁？
     # 当前设计：Engine 负责接收请求，HeadTPWorker 负责调度和 batching
-    def start(self):
+    def start_running(self):
         """Engine 主循环"""
         while True:
             # 1. 从队列获取请求
             request = self.req_queue.get()
             
+            if request.input_str is None:
+                continue
+            else:
+                logger.info("Engine received request: %s", request.input_str)
             # 2. Tokenize（在 CPU 上执行）
+
             request.token_ids = self.tokenizer.encode(request.input_str)
             
             # 3. 发送给 HeadTPWorker
