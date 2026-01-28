@@ -24,5 +24,8 @@ setup(
         "transformers",
         "xxhash",
     ],
+    extras_require={
+        "flash-attn": ["flash-attn>=2.0.0"],
+    },
     package_dir={"m_vllm": "m-vllm"},
 )
