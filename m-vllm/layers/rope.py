@@ -38,7 +38,7 @@ class RotaryPositionEmbedding(nn.Module):
 
 
 @lru_cache(maxsize=1)
-def get_rope(head_dim, max_position_embeddings=2048, rope_base=10000):
-    rope = RotaryPositionEmbedding(head_dim, max_position_embeddings, rope_base)
+def get_rope(head_dim, max_position_embeddings=2048, rope_theta=10000):
+    rope = RotaryPositionEmbedding(head_dim, max_position_embeddings, rope_theta)
     return rope
 

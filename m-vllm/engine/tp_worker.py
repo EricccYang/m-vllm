@@ -5,6 +5,7 @@ import multiprocessing as mp
 import logging
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
+from multiprocessing import Value
 
 from m_vllm.engine.model_runner import ModelRunner
 from m_vllm.engine.scheduler import Scheduler
@@ -21,6 +22,7 @@ def launch_tp_group(
     global_config: GlobalConfig,
     engine_post_req_event: Event,
     engine_get_result_event: Event,
+    model_ready: Value,
 ):
     # 在子进程中重新配置日志（spawn 模式不会继承父进程的日志配置）
     logging.basicConfig(
@@ -36,6 +38,7 @@ def launch_tp_group(
         global_config,
         engine_post_req_event,
         engine_get_result_event,
+        model_ready,
     )
     worker.start()
 
@@ -124,7 +127,7 @@ class TPWorker:
             cf.num_hidden_layers,
             self.global_config.num_kvcache_blocks,
             self.global_config.kvcache_block_size,
-            cf.num_attention_heads,
+            cf.num_key_value_heads,
             cf.head_dim,
         ).cuda(non_blocking=True)
         layer_id = 0
@@ -165,9 +168,11 @@ class HeadTPWorker(TPWorker):
         global_config: GlobalConfig,
         engine_post_req_event: Event,
         engine_get_result_event: Event,
+        model_ready: Value,
     ):
         self.engine_post_req_event = engine_post_req_event
         self.engine_get_result_event = engine_get_result_event
+        self.model_ready = model_ready
         self.get_req_shm = SharedMemory(name="mem_engine_to_tp_head", create=False)
         self.send_result_shm = SharedMemory(name="mem_tp_head_to_engine", create=False)
 
@@ -188,8 +193,16 @@ class HeadTPWorker(TPWorker):
 
         logger.info("tp group config in head tp worker: %s", self.tp_group_config)
         self._launch_tp_workers()
+        logger.info("Initializing distributed environment and loading model...")
         self.init_dist_and_load()
+        logger.info("Model loaded successfully")
         self.scheduler = Scheduler(global_config)
+        logger.info("Scheduler created")
+        
+        # 通知父进程模型已加载完成
+        with self.model_ready.get_lock():
+            self.model_ready.value = 1
+        logger.info("Model ready flag set")
 
     def start(self):
         self._loop()
@@ -197,7 +210,8 @@ class HeadTPWorker(TPWorker):
     def _launch_tp_workers(self):
         
         ctx = mp.get_context("spawn")
-        manager = mp.Manager()
+        # 使用相同的 spawn 上下文创建 Manager
+        manager = ctx.Manager()
 
         for i in range(1, self.tp_group_config.group_size):
             event = manager.Event()
@@ -240,7 +254,6 @@ class HeadTPWorker(TPWorker):
         n = int.from_bytes(self.get_req_shm.buf[0:4], "little")
         request = pickle.loads(self.get_req_shm.buf[4 : n + 4])
         self.engine_post_req_event.clear()
-        self.scheduler.add_request(request)
         return request
 
     def send_result_to_engine(self, results):
@@ -277,11 +290,28 @@ class HeadTPWorker(TPWorker):
         max_seqlen_k = 0
         slot_mapping = []
         block_tables = []
+        
+        logger.info(f"prepare_prefill: num_sequences={len(run_batch.sequences)}")
+        if not run_batch.sequences:
+            logger.error("prepare_prefill: run_batch.sequences is empty!")
+            raise ValueError("Cannot prepare prefill batch with empty sequences")
+            
         for seq in run_batch.sequences:
             seq_len = len(seq.token_ids)
-            real_len = seq_len - seq.num_cached_tokens
-            input_ids.extend(seq.token_ids[seq.num_cached_tokens :])
-            positions.extend(list[int](range(seq.num_cached_tokens, len)))
+            # 在 prefill 模式下，处理所有 tokens，不管 cache 状态
+            # num_cached_tokens 在 allocate 时可能被更新，但 prefill 应该处理所有 tokens
+            real_len = seq_len
+            logger.info(f"Prefill seq: seq_len={seq_len}, num_cached_tokens={seq.num_cached_tokens}, "
+                       f"real_len={real_len}, token_ids={seq.token_ids[:10] if len(seq.token_ids) > 10 else seq.token_ids}")
+            
+            # 确保 real_len > 0
+            if real_len <= 0:
+                logger.warning(f"Sequence has real_len={real_len}, skipping. seq_len={seq_len}")
+                continue
+                
+            # token_ids 是 list，在 prefill 模式下处理所有 tokens
+            input_ids.extend(seq.token_ids)
+            positions.extend(list[int](range(seq_len)))
             seqlen_q = real_len
             seqlen_k = seq_len
             cu_seq_q.append(cu_seq_q[-1] + real_len)
@@ -293,10 +323,18 @@ class HeadTPWorker(TPWorker):
             for i in range(seq.num_cached_blocks, seq.num_blocks):
                 start = seq.block_table[i] * seq.block_size
                 if i == seq.num_blocks - 1:
-                    end = start + seq.block_size
-                else:
+                    # 最后一个 block 可能不完整，使用实际的 token 数量
                     end = start + seq.last_block_num_tokens
+                else:
+                    # 完整的 block，使用 block_size
+                    end = start + seq.block_size
                 slot_mapping.extend(list[int](range(start, end)))
+        
+        # 检查 input_ids 是否为空
+        if not input_ids:
+            logger.error("prepare_prefill: input_ids is empty!")
+            raise ValueError("Cannot prepare prefill batch with empty input_ids")
+            
         if cu_seq_q[-1] < cu_seq_k[-1]:
             block_tables = self.prepare_block_tables(run_batch.sequences)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
@@ -332,6 +370,7 @@ class HeadTPWorker(TPWorker):
         block_tables = []
         context_lens = []
         for seq in run_batch.sequences:
+            # last_token 是 list 的最后一个元素
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
@@ -371,6 +410,9 @@ class HeadTPWorker(TPWorker):
             self.scheduler.add_request(request)
 
             run_batch = self.scheduler.schedule()
+            # 如果没有可调度的序列，跳过本次循环
+            if run_batch is None:
+                continue
             input_ids, positions = self.prepare_batch(run_batch)
 
             if self.world_size > 1:

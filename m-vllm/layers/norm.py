@@ -36,7 +36,7 @@ class RMSNorm(nn.Module):
 
     def forward(
         self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
             return self.add_forward(x, residual)
         else:

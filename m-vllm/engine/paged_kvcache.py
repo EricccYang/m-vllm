@@ -2,14 +2,17 @@ import xxhash
 from typing import TYPE_CHECKING
 import numpy as np
 from collections import deque
+import logging
 
 if TYPE_CHECKING:
     from m_vllm.data_classes.batch import Sequence
 
+logger = logging.getLogger(__name__)
+
 
 class Block:
     def __init__(self, block_id: int):
-        self.block_id = None
+        self.block_id = block_id
         self.reference_count = 0
         self.hash = -1
         self.token_ids = []
@@ -29,8 +32,11 @@ class BlockManager:
         self.block_size = block_size
         self.hash_to_block_id_map: dict[int, int] = dict[int, int]()
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
-        self.free_blocks: deque[int] = deque[int]()
+        # 初始化时所有 blocks 都是 free 的
+        self.free_blocks: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set[int]()
+        logger.info(f"BlockManager initialized: num_blocks={num_blocks}, block_size={block_size}, "
+                   f"free_blocks={len(self.free_blocks)}")
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -42,19 +48,29 @@ class BlockManager:
 
     def _allocate_block(self, block_id: int) -> Block:
         block = self.blocks[block_id]
-        assert block.ref_count == 0
+        assert block.reference_count == 0
         block.reset()
         self.free_blocks.remove(block_id)
         self.used_block_ids.add(block_id)
+        logger.debug(f"Allocated block {block_id}, free_blocks={len(self.free_blocks)}")
         return self.blocks[block_id]
 
     def _deallocate_block(self, block_id: int) -> Block:
-        assert self.blocks[block_id].ref_count == 0
+        assert self.blocks[block_id].reference_count == 0
         self.used_block_ids.remove(block_id)
         self.free_blocks.append(block_id)
+        logger.debug(f"Deallocated block {block_id}, free_blocks={len(self.free_blocks)}")
 
     def can_allocate(self, count: int) -> bool:
         return len(self.free_blocks) >= count
+
+    def can_append(self, seq: "Sequence") -> bool:
+        """检查序列是否可以追加新的 token"""
+        # 如果下一个 token 需要新的 block，检查是否有 free blocks
+        if len(seq) % self.block_size == 0:
+            return len(self.free_blocks) > 0
+        # 否则可以追加（使用现有 block）
+        return True
 
     def may_append(self, seq: "Sequence"):
         block_table = seq.block_table
@@ -105,8 +121,8 @@ class BlockManager:
     def deallocate(self, seq: "Sequence"):
         for block_id in reversed(seq.block_table):
             block = self.blocks[block_id]
-            block.ref_count -= 1
-            if block.ref_count == 0:
+            block.reference_count -= 1
+            if block.reference_count == 0:
                 self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()

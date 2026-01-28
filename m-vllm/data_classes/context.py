@@ -1,17 +1,18 @@
 from dataclasses import dataclass
-
+import torch
 
 
 
 @dataclass
 class Context:
-    is_prefill: bool
-    cu_seqlens_q: list[int]
-    cu_seqlens_k: list[int]
-    max_seqlen_q: int
-    max_seqlen_k: int
-    slot_mapping: list[int]
-    block_tables: list[int]
+    is_prefill: bool = False
+    cu_seqlens_q: torch.Tensor | None = None
+    cu_seqlens_k: torch.Tensor | None = None
+    max_seqlen_q: int = 0
+    max_seqlen_k: int = 0
+    slot_mapping: torch.Tensor | None = None
+    context_lens: torch.Tensor | None = None
+    block_tables: torch.Tensor | None = None
 
 
 _CONTEXT = Context(False, [], [], 0, 0, [], [])

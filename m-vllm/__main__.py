@@ -6,6 +6,7 @@ from m_vllm.engine.engine import LLMEngine
 from m_vllm.data_classes.server_args import ServerArgs
 from transformers import AutoConfig
 from m_vllm.data_classes.request import Request
+import time
 # Qwen3Config 是 PretrainedConfig 的子类，如果需要特定类型可以使用
 # from transformers import Qwen3Config
 
@@ -24,12 +25,16 @@ if __name__ == "__main__":
     # model_config = Qwen3Config(hf_config)
     # model = Qwen3ForCausalLM(model_config)
     # load_model(model, path)
-    args = ServerArgs(path, tensor_parallel_size=2, pipeline_parallel_size=1)
+    args = ServerArgs(path, tensor_parallel_size=1, pipeline_parallel_size=1)
     engine = LLMEngine(args)
-    engine.start_running()
 
     engine.add_request(Request(input_str="Hello, world!"))
     engine.add_request(Request(input_str="Hello, world! 2"))
+    engine.start_running()
+
+
+    while True:
+        time.sleep(1)
 
 
     # print(model(torch.randn(1, 1024)))

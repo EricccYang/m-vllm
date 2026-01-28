@@ -43,7 +43,7 @@ class LinearBase(nn.Module):
 class ColumnParallelLinear(LinearBase):
     def __init__(self, input_size: int, output_size: int, bias: bool = False):
         tp_size = dist.get_world_size()
-        super().__init__(input_size, divide(output_size, tp_size), bias,0)
+        super().__init__(input_size, divide(output_size, tp_size), bias, 0)
 
 
     def weight_loader(self,  param : nn.Parameter, weight: torch.Tensor):
@@ -63,7 +63,7 @@ class ColumnParallelLinear(LinearBase):
 class MergedColumnParallelLinear(ColumnParallelLinear):
     def __init__(self, input_size: int, output_size: int, bias: bool = False):
         tp_size = dist.get_world_size()
-        super().__init__(input_size, divide(output_size, tp_size), bias,0)
+        super().__init__(input_size, divide(output_size, tp_size), bias)
 
     def weight_loader(self,  param : nn.Parameter, weight: torch.Tensor):
         param_data = param.data
@@ -81,7 +81,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.num_kv_heads = num_kv_heads//self.tp_size  
         self.head_dim = head_dim
         output_size = (self.num_heads + 2 * self.num_kv_heads) * self.head_dim
-        super().__init__( input_size ,output_size, bias, 0)
+        super().__init__(input_size, output_size, bias)
         
 
     def weight_loader(self,  param : nn.Parameter, weight: torch.Tensor, loaded_shard_id: str):

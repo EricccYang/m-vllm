@@ -1,4 +1,3 @@
-import torch
 from typing import TYPE_CHECKING
 from enum import Enum, auto
 from dataclasses import dataclass
@@ -20,9 +19,9 @@ class SamplingParams:
 
 
 class Sequence:
-    def __init__(self, input_ids: torch.Tensor, positions: torch.Tensor, sampling_params):
-        self.num_tokens = input_ids.shape[0]
-        self.token_ids = list[int]()
+    def __init__(self, input_ids: list[int], sampling_params):
+        self.num_tokens = len(input_ids)  # 使用 len 而不是 shape[0]
+        self.token_ids = input_ids
         self.positions = list[int]()
         self.block_table = []
         self.block_size = 256
@@ -31,7 +30,6 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
         self.max_tokens = sampling_params.max_tokens
 
-    @property
     def __len__(self):
         return len(self.token_ids)
 
@@ -80,5 +78,5 @@ class RunBatch:
     def __init__(self, sequences: list[Sequence]):
         self.input_ids = None
         self.positions = None
-        self.prefill_mode = False
-        self.sequences = list[Sequence]()
+        self.prefill_mode = True
+        self.sequences = sequences  # 使用传入的 sequences 参数

@@ -17,6 +17,7 @@ from m_vllm.data_classes.config import GlobalConfig, TpGroupConfig
 # from m_vllm.utils.logger import init_logger
 import logging
 import atexit
+import time
 
 # 配置日志系统
 logging.basicConfig(
@@ -68,7 +69,8 @@ class LLMEngine:
 
     def init_worker_group(self):
         ctx = mp.get_context("spawn")
-        manager = mp.Manager()
+        # 使用相同的 spawn 上下文创建 Manager
+        manager = ctx.Manager()
         
         # 清理可能存在的旧共享内存
         _cleanup_shared_memory("mem_engine_to_tp_head")
@@ -80,16 +82,25 @@ class LLMEngine:
         self.post_req_event = manager.Event()  # 通知 HeadTPWorker 请求已写入
         self.get_result_event = manager.Event()  # 通知 Engine 结果已写入
         
+        # 使用相同的 spawn 上下文创建 Value
+        self.model_ready = ctx.Value('i', 0)
+        
         # 注册清理函数，确保程序退出时释放共享内存
         atexit.register(self.cleanup)
 
         self.processes = []
         process = ctx.Process(
             target=launch_tp_group, 
-            args=(0, self.model_config, self.global_config, self.post_req_event, self.get_result_event)
+            args=(0, self.model_config, self.global_config, self.post_req_event, self.get_result_event, self.model_ready)
         )
         process.start()
         self.processes.append(process)
+        
+        # 等待模型加载完成
+        logger.info("Waiting for model to be loaded in worker process...")
+        while self.model_ready.value == 0:
+            time.sleep(0.1)  # 轮询检查，避免阻塞
+        logger.info("Model loaded successfully in worker process")
 
 
         # 管理 batch 的能力应该交给谁？
@@ -107,6 +118,8 @@ class LLMEngine:
             # 2. Tokenize（在 CPU 上执行）
 
             request.token_ids = self.tokenizer.encode(request.input_str)
+
+            logger.info(f"Engine tokenized request: {request.token_ids}")
             
             # 3. 发送给 HeadTPWorker
             self.send_to_worker(request)
@@ -137,8 +150,6 @@ class LLMEngine:
 
  
 
-
-
     def add_request(self, request: Request):
         self.req_queue.put(request)
 
@@ -147,7 +158,7 @@ class LLMEngine:
 
     def detokenize(self, request: Request):
         tk = self.tokenizer.decode(request.token_ids)
-        return "str"
+        return tk
 
     def process_results(self, results: list[Request]):
         """处理返回的结果"""
