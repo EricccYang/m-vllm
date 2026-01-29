@@ -3,6 +3,7 @@ import torch.distributed as dist
 import pickle
 import multiprocessing as mp
 import logging
+import time
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 from multiprocessing import Value
@@ -11,8 +12,9 @@ from m_vllm.engine.model_runner import ModelRunner
 from m_vllm.engine.scheduler import Scheduler
 from m_vllm.data_classes.batch import RunBatch, Sequence
 from m_vllm.data_classes.config import GlobalConfig, TpGroupConfig, ModelConfig
-from m_vllm.data_classes.context import set_context
-
+from m_vllm.data_classes.context import set_context, reset_context
+from m_vllm.models.modeloader import load_model
+from transformers import AutoTokenizer
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +84,7 @@ class TPWorker:
         torch.cuda.set_device(self.world_rank)
         torch.set_default_device("cuda")
         self.model_runner = ModelRunner(self.model_config.model_path, self.global_config)
+        load_model(self.model_runner.model, self.model_config.model_path)
         self.allocate_kv_cache()
         torch.set_default_dtype(default_dtype)
 
@@ -249,8 +252,17 @@ class HeadTPWorker(TPWorker):
     def schedule(self):
         return self.scheduler.schedule()
 
-    def read_request_from_engine(self):
-        self.engine_post_req_event.wait()
+    def read_request_from_engine(self, timeout: float = 0.0):
+        """
+        非阻塞地读取来自 Engine 的请求
+        Args:
+            timeout: 等待超时时间，0.0 表示非阻塞
+        Returns:
+            Request 对象，如果没有请求则返回 None
+        """
+        if not self.engine_post_req_event.wait(timeout=timeout):
+            return None  # 没有请求，非阻塞返回
+        
         n = int.from_bytes(self.get_req_shm.buf[0:4], "little")
         request = pickle.loads(self.get_req_shm.buf[4 : n + 4])
         self.engine_post_req_event.clear()
@@ -289,7 +301,7 @@ class HeadTPWorker(TPWorker):
         max_seqlen_q = 0
         max_seqlen_k = 0
         slot_mapping = []
-        block_tables = []
+        block_tables = None
         
         logger.info(f"prepare_prefill: num_sequences={len(run_batch.sequences)}")
         if not run_batch.sequences:
@@ -335,8 +347,8 @@ class HeadTPWorker(TPWorker):
             logger.error("prepare_prefill: input_ids is empty!")
             raise ValueError("Cannot prepare prefill batch with empty input_ids")
             
-        if cu_seq_q[-1] < cu_seq_k[-1]:
-            block_tables = self.prepare_block_tables(run_batch.sequences)
+        # 在 prefill 阶段，序列已经通过 scheduler.allocate() 分配了 blocks
+        # 所以总是需要设置 block_tables 用于 paged attention
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
         )
@@ -352,6 +364,8 @@ class HeadTPWorker(TPWorker):
         slot_mapping = torch.tensor(
             slot_mapping, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
+        # Prefill 阶段总是需要 block_tables，因为序列已经分配了 blocks
+        block_tables = self.prepare_block_tables(run_batch.sequences)
         set_context(
             True,
             cu_seq_q,
@@ -359,7 +373,8 @@ class HeadTPWorker(TPWorker):
             max_seqlen_q,
             max_seqlen_k,
             slot_mapping,
-            block_tables,
+            context_lens=None,
+            block_tables=block_tables
         )
         return input_ids, positions
 
@@ -374,9 +389,11 @@ class HeadTPWorker(TPWorker):
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
+            # 当前输入 token（position L-1）的 K/V 写入其对应 slot
             slot_mapping.append(
                 seq.block_table[-1] * seq.block_size + seq.last_block_num_tokens - 1
             )
+        
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
         )
@@ -390,7 +407,12 @@ class HeadTPWorker(TPWorker):
             slot_mapping, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
         block_tables = self.prepare_block_tables(run_batch.sequences)
-        set_context(True, context_lens, slot_mapping, block_tables)
+        set_context(
+            is_prefill=False,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables
+        )
         return input_ids, positions
 
     def prepare_block_tables(self, seqs: list[Sequence]):
@@ -405,20 +427,36 @@ class HeadTPWorker(TPWorker):
 
     def _loop(self):
         logger.info("HeadTPWorker loop started")
-        while True:
-            request = self.read_request_from_engine()
-            self.scheduler.add_request(request)
 
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_config.model_path, use_fast=True)
+        while True:
+            # 非阻塞地检查新请求
+            request = self.read_request_from_engine(timeout=0.0)
+            if request is not None and request.input_str is not None:
+                logger.info(f"HeadTPWorker received new request: {request.input_str}")
+                self.scheduler.add_request(request)
+
+            # 无论是否有新请求，都尝试调度和执行 decode
             run_batch = self.scheduler.schedule()
-            # 如果没有可调度的序列，跳过本次循环
+            # 如果没有可调度的序列，继续循环（可能等待新请求或处理其他任务）
             if run_batch is None:
+                # 如果没有可调度的序列，短暂休眠避免 CPU 空转
+                time.sleep(0.001)  # 1ms
                 continue
+            
+            # 有可调度的序列，执行推理
+            logger.debug(f"HeadTPWorker processing batch with {len(run_batch.sequences)} sequences")
             input_ids, positions = self.prepare_batch(run_batch)
 
             if self.world_size > 1:
                 self.send_batch_to_tp_workers(run_batch)
 
             logits = self.model_runner.run(input_ids, positions)
-            token_ids = self.model_runner.sample(logits, run_batch)
+            temperatures = torch.tensor([1.0], dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+            logger.info(f"logits.shape={logits.shape}")
+            token_ids = self.model_runner.sample(logits, temperatures)
             self.scheduler.post_process(run_batch.sequences, token_ids)
+            text = self.tokenizer.decode(run_batch.sequences[0].token_ids)
+            logger.info(f"HeadTPWorker generated text: {text}")
+            reset_context()
             self.send_result_to_engine(run_batch.sequences)

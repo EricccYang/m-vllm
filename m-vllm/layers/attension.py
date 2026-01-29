@@ -51,8 +51,8 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
     assert key.stride(-1) == 1 and value.stride(-1) == 1
     assert key.stride(1) == head_dim and value.stride(1) == head_dim
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
-    logger.info(f"store_kvcache: key.shape={key.shape}, value.shape={value.shape}, k_cache.shape={k_cache.shape}, v_cache.shape={v_cache.shape}, slot_mapping.shape={slot_mapping.shape}")
-    logger.info(f"  N = {N}, num_heads = {num_heads}, head_dim = {head_dim}, D = {D}")
+    # logger.info(f"store_kvcache: key.shape={key.shape}, value.shape={value.shape}, k_cache.shape={k_cache.shape}, v_cache.shape={v_cache.shape}, slot_mapping.shape={slot_mapping.shape}")
+    # logger.info(f"  N = {N}, num_heads = {num_heads}, head_dim = {head_dim}, D = {D}")
     assert slot_mapping.numel() == N
     store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
 
@@ -91,11 +91,11 @@ class Attention(nn.Module):
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
-            logger.info(f"flash_attn_varlen_func output shape: {o.shape}")
+            # logger.info(f"flash_attn_varlen_func output shape: {o.shape}")
         else:    # decode
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
                                         cache_seqlens=context.context_lens, block_table=context.block_tables, 
                                         softmax_scale=self.scale, causal=True)
-            logger.info(f"flash_attn_with_kvcache output shape: {o.shape}")
-        logger.info(f"Attention output o.shape={o.shape}, o.flatten(1,-1).shape={o.flatten(1, -1).shape}")
+            # logger.info(f"flash_attn_with_kvcache output shape: {o.shape}")
+        # logger.info(f"Attention output o.shape={o.shape}, o.flatten(1,-1).shape={o.flatten(1, -1).shape}")
         return o

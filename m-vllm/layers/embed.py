@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from torch.nn import functional as F
-
+from m_vllm.data_classes.context import get_context
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -36,8 +36,6 @@ class VocabParallelEmbedding(nn.Module):
     
 
 
-def get_context():
-    return None
 
 
 class ParallelLMHead(VocabParallelEmbedding):
@@ -56,7 +54,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             last_indices = context.cu_seqlens_q[1:] - 1
             input_ids = input_ids[last_indices].contiguous()
         logits = F.linear(input_ids, self.weight)
-        if self.tp_rank > 1:
+        if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
             dist.gather(logits, all_logits, 0)
             logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None

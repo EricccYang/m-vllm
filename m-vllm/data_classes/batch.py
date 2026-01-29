@@ -9,6 +9,7 @@ class SequenceStatus(Enum):
     WAITING = auto()
     RUNNING = auto()
     COMPLETED = auto()
+    FINISHED = auto()
 
 
 
@@ -75,8 +76,8 @@ class Sequence:
 
 
 class RunBatch:
-    def __init__(self, sequences: list[Sequence]):
+    def __init__(self, sequences: list[Sequence], prefill_mode: bool = True):
         self.input_ids = None
         self.positions = None
-        self.prefill_mode = True
+        self.prefill_mode = prefill_mode
         self.sequences = sequences  # 使用传入的 sequences 参数

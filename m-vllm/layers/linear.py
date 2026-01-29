@@ -59,19 +59,19 @@ class ColumnParallelLinear(LinearBase):
 
 
 
-
 class MergedColumnParallelLinear(ColumnParallelLinear):
-    def __init__(self, input_size: int, output_size: int, bias: bool = False):
+    def __init__(self, input_size: int, output_size: list[int], bias: bool = False):
+        self.output_size = output_size  # 供 weight_loader 使用，需在 super() 前设置（与 nano 一致）
         tp_size = dist.get_world_size()
-        super().__init__(input_size, divide(output_size, tp_size), bias)
+        super().__init__(input_size, sum(output_size), bias)
 
-    def weight_loader(self,  param : nn.Parameter, weight: torch.Tensor):
+    def weight_loader(self,  param : nn.Parameter, weight: torch.Tensor, loaded_shard_id: int):
         param_data = param.data
-        shard_size = param_data.size(self.tp_dim)
-        start_idx = shard_size * self.tp_rank
-
-
-
+        shard_offset = sum(self.output_size[:loaded_shard_id]) // self.tp_size
+        shard_size = self.output_size[loaded_shard_id] // self.tp_size
+        param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
+        weight = weight.chunk(self.tp_size,self.tp_dim)[self.tp_rank]
+        param_data.data.copy_(weight)
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -103,8 +103,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.data.copy_(weight)
 
         
-        
-
 
 
 class RowParallelLinear(LinearBase):
@@ -120,7 +118,8 @@ class RowParallelLinear(LinearBase):
         param_data.data.copy_(weight)
 
     def forward(self, x: torch.Tensor):
-        y = F.linear(x, self.weight, self.bias)
+        # 与 nano 一致：仅 rank 0 加 bias，避免 all_reduce 后 bias 被加 tp_size 次
+        y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
             dist.all_reduce(y)
         return y

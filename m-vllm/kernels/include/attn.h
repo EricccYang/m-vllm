@@ -19,3 +19,5 @@
 
 void rms_norm_kernel(
     torch::Tensor const& x);
+
+void mha_kernel(float* q, float* k, float* v, float* output, int batch_size, int head_size, int num_heads);

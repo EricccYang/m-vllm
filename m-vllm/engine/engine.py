@@ -164,9 +164,10 @@ class LLMEngine:
         """处理返回的结果"""
         for req in results:
             text = self.detokenize(req)
+            logger.info(f"Engine processed result: {text}")
             # 发送结果给用户
-            if hasattr(req, 'callback'):
-                req.callback(text)
+            # if hasattr(req, 'callback'):
+            #     req.callback(text)
 
     def cleanup(self):
         """清理资源，释放共享内存"""

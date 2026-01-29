@@ -1,11 +1,8 @@
-from re import M
 from transformers import Qwen3Config
 import torch
 from torch import nn
 from typing import Optional
 from m_vllm.models.BaseModel import BaseModel
-from m_vllm.kernels.m_vllm_csrc import add
-from m_vllm.backends.backend import MHAAttBackEnd
 from m_vllm.layers.norm import RMSNorm
 from m_vllm.layers.mlp import MLP
 from m_vllm.layers.rope import get_rope
@@ -30,9 +27,13 @@ class MLP(nn.Module):
         super().__init__()
         # self.impl = GatedMlpBackend()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, intermediate_size, bias=False
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
         )
-        self.down_proj = RowParallelLinear(hidden_size, hidden_size, bias=False)
+        # down_proj 的输入维度应该是 intermediate_size，输出维度是 hidden_size
+        # gate_up_proj 输出 2 * intermediate_size，经过 SiluAndMul 后变回 intermediate_size
+        self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
         self.act = SiluAndMul()
 
     def forward(self, x: torch.Tensor):
@@ -77,9 +78,13 @@ class Qwen3Attention(nn.Module):
             self.num_kv_heads,
             bias=qkv_bias,
         )
-
-        self.q_norm = RMSNorm(head_dim, norm_eps)
-        self.k_norm = RMSNorm(head_dim, norm_eps)
+        # 与 nano 一致：仅当无 qkv_bias 时才做 q/k norm（Qwen3 约定）
+        if not qkv_bias:
+            self.q_norm = RMSNorm(head_dim, norm_eps)
+            self.k_norm = RMSNorm(head_dim, norm_eps)
+        else:
+            self.q_norm = None
+            self.k_norm = None
         self.rotary_emb = get_rope(head_dim, max_position_embeddings, self.rope_theta)
 
         self.mha_att_backend = Attention(num_heads, head_dim, self.scaling, num_kv_heads)
@@ -103,19 +108,18 @@ class Qwen3Attention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
 
-        # qwen3特有 q k norm, 单头norm
-        #  k_norm.weight  [128]
-        #  q_norm.weight   [128]
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # qwen3 特有 q/k norm，仅当无 qkv_bias 时应用（与 nano 一致）
+        if self.q_norm is not None and self.k_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # 旋转位置编码
         q, k = self.rotary_emb(positions, q, k)
 
         # attension
         o = self.mha_att_backend(q, k, v)
-        logger.info(f"Qwen3Attention: o.shape={o.shape}, num_heads={self.num_heads}, head_dim={self.head_dim}, hidden_size={self.hidden_size}")
-        logger.info(f"  o.flatten(1,-1).shape={o.flatten(1, -1).shape}, expected hidden_size={self.hidden_size}")
+        # logger.info(f"Qwen3Attention: o.shape={o.shape}, num_heads={self.num_heads}, head_dim={self.head_dim}, hidden_size={self.hidden_size}")
+        # logger.info(f"  o.flatten(1,-1).shape={o.flatten(1, -1).shape}, expected hidden_size={self.hidden_size}")
 
         # o_proj
         output = self.o_proj(o.flatten(1, -1))
@@ -130,14 +134,14 @@ class Qwen3DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             model_config.hidden_size, model_config.rms_norm_eps
         )
-        self.selt_attn = Qwen3Attention(
+        self.self_attn = Qwen3Attention(
             hidden_size=model_config.hidden_size,
             num_heads=model_config.num_attention_heads,
             head_dim=model_config.head_dim,
             num_kv_heads=model_config.num_key_value_heads,
             max_position_embeddings=model_config.max_position_embeddings,
             norm_eps=model_config.rms_norm_eps,
-            qkv_bias=model_config.attention_bias,
+            qkv_bias=getattr(model_config, "attention_bias", True),
             rope_theta=getattr(model_config, "rope_theta", 1000000),
             rope_scaling=getattr(model_config, "rope_scaling", None),
         )
@@ -157,7 +161,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.selt_attn(hidden_states, position_ids)
+        hidden_states = self.self_attn(hidden_states, position_ids)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -178,9 +182,10 @@ class Qwen3Model(BaseModel):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        residual = None # 残差初始化为None
         for layer in self.layers:
-            hidden_states, _ = layer(positions, hidden_states)
-        hidden_states, _ = self.norm(hidden_states)
+            hidden_states, residual = layer(positions, hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states,residual)
         return hidden_states
 
 
@@ -198,9 +203,13 @@ class Qwen3ForCausalLM(BaseModel):
         super().__init__()
         self.model = Qwen3Model(model_config)
         self.lm_head = ParallelLMHead(model_config.vocab_size, model_config.hidden_size)
+        if getattr(model_config, "tie_word_embeddings", False):
+            self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
-    def forward(self, positions: torch.Tensor, input_ids: torch.Tensor):
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return self.model(input_ids, positions)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.lm_head(hidden_states)
+        test = self.lm_head(hidden_states)
+        logger.info(f"logits.shape={test.shape}")
+        return test

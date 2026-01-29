@@ -40,6 +40,9 @@ class Scheduler:
         logger.info(f"Schedule called: waiting_queue={len(self.waiting_queue)}, running_queue={len(self.running_queue)}, "
                    f"free_blocks={len(self.block_manager.free_blocks)}, max_num_seqs={self.max_num_seqs}")
 
+        if not self.waiting_queue and not self.running_queue:
+            return None
+
         # prefill: 优先处理等待队列中的新请求
         while self.waiting_queue and num_seqs < self.max_num_seqs:
             seq = self.waiting_queue[0]
@@ -68,7 +71,7 @@ class Scheduler:
         
         if sqs:
             logger.info(f"Returning prefill batch: {len(sqs)} sequences")
-            return RunBatch(sqs)
+            return RunBatch(sqs, prefill_mode=True)
 
         # decode: 处理正在运行的序列
         logger.info(f"Starting decode phase: running_queue={len(self.running_queue)}")
@@ -111,13 +114,19 @@ class Scheduler:
         
         assert sqs
         self.running_queue.extendleft(reversed(sqs))
-        return RunBatch(sqs)
+        return RunBatch(sqs, prefill_mode=False)
 
     def post_process(self, seqs: list[Sequence], token_ids: list[int]):
-        for seq, token_id in zip[tuple[Sequence, int]](seqs, token_ids):
+        for seq, token_id in zip(seqs, token_ids):  # type: ignore
             # 将新的 token_id 追加到 list 中
+            if hasattr(token_id, 'item'):
+                token_id = token_id.item()
+            else:
+                token_id = int(token_id)
             seq.token_ids.append(token_id)
+            logger.info(f"Post process: seq.token_ids={seq.token_ids}, token_id={token_id}")
             seq.num_tokens += 1
+            logger.info( f"eos = {self.eos}, seq.ignore_eos = {seq.ignore_eos}, token_id = {token_id}")
             if not seq.ignore_eos and token_id == self.eos:
                 seq.status = SequenceStatus.FINISHED
             if seq.max_tokens and len(seq) >= seq.max_tokens:
